@@ -373,34 +373,70 @@ class UnifiedBacktester:
     def _finalize_backtest(self):
         """结束回测，生成报告"""
         try:
-            print(f"\n回测完成！")
-            print(f"  最终资金: {self.balance + self.get_total_position_value():.2f} USDT")
-            print(f"  初始资金: {self.initial_balance:.2f} USDT")
+            # 强制平仓所有持仓（回测结束时必须平仓）
+            logger.info("回测结束前强制平仓所有持仓...")
+            self.strategy.close_all_positions("回测结束")
 
-            total_profit = (self.balance + self.get_total_position_value()) - self.initial_balance
+            # 检查是否还有未平仓的持仓（可能是平仓失败导致）
+            # 用户要求：如果有未平仓持仓，不计入最后一轮的盈亏
+            active_positions = []
+            unsettled_profit = 0.0
+
+            for symbol, pos in self.strategy.positions.items():
+                if pos.get('status') == 'active':
+                    active_positions.append(symbol)
+                    # 记录未平仓持仓的盈亏
+                    unsettled_profit += pos.get('profit', 0)
+                    logger.warning(f"[回测结束] {symbol} 未平仓: {pos['direction']} 浮动盈亏={pos.get('profit', 0):.2f} USDT")
+
+            # 计算总资金（余额 + 已平仓持仓价值）
+            # 注意：未平仓持仓的 profit 可能是浮动的，不计入统计
+            total_balance = self.balance
+            settled_position_value = 0.0
+
+            for pos in self.strategy.positions.values():
+                if pos.get('status') == 'closed':
+                    # 已平仓持仓的价值已经计入余额，不需要再加
+                    pass
+                # 未平仓持仓不计入统计（因为其盈亏是浮动的）
+
+            # 总盈亏 = 当前余额 - 初始余额
+            total_profit = total_balance - self.initial_balance
             profit_pct = (total_profit / self.initial_balance) * 100 if self.initial_balance > 0 else 0
 
-            print(f"  总盈亏: {total_profit:+.2f} USDT ({profit_pct:+.2f}%)")
+            print(f"\n回测完成！")
+            print(f"  最终资金: {total_balance:.2f} USDT")
+            print(f"  初始资金: {self.initial_balance:.2f} USDT")
+
+            if active_positions:
+                print(f"  总盈亏: {total_profit:+.2f} USDT ({profit_pct:+.2f}%)")
+                print(f"  ⚠️ 注意: 有 {len(active_positions)} 个未平仓持仓，其浮动盈亏不计入统计")
+                print(f"     未平仓浮动盈亏总计: {unsettled_profit:+.2f} USDT")
+                print(f"     如果计入，实际总盈亏将是: {total_profit + unsettled_profit:+.2f} USDT")
+                print("\n未平仓持仓详情:")
+                for symbol, pos in self.strategy.positions.items():
+                    if pos.get('status') == 'active':
+                        print(f"  - {symbol}: {pos['direction']} 浮动盈亏={pos.get('profit', 0):.2f} USDT ({pos.get('profit_pct', 0):.2f}%)")
+            else:
+                print(f"  总盈亏: {total_profit:+.2f} USDT ({profit_pct:+.2f}%)")
+                print(f"  ✓ 所有持仓已平仓，盈亏已全部结算")
 
             print(f"\n持仓统计:")
             print(f"  交易次数: {len(self.executor.trade_history)}")
-            print(f"  当前持仓: {len([p for p in self.strategy.positions.values() if p.get('status') == 'active'])}")
-
-            # 显示最终持仓
-            active_positions = []
-            for symbol, pos in self.strategy.positions.items():
-                if pos.get('status') == 'active':
-                    print(f"  - {symbol}: {pos['direction']} 盈亏={pos['profit_pct']:+.2f}%")
-                    active_positions.append(symbol)
+            if active_positions:
+                print(f"  已平仓: {len(self.strategy.positions) - len(active_positions)}")
+                print(f"  未平仓: {len(active_positions)}")
 
             # 返回结果（不等待用户输入）
             return {
-                'final_balance': self.balance + self.get_total_position_value(),
+                'final_balance': total_balance,
                 'initial_balance': self.initial_balance,
                 'total_profit': total_profit,
                 'profit_pct': profit_pct,
+                'unsettled_profit': unsettled_profit,
                 'trade_history': self.executor.trade_history,
                 'active_positions': active_positions,
+                'unrealized_positions_count': len(active_positions),
                 'balance_history': self.results['balance_history'],
                 'timestamp_history': self.results['timestamp_history']
             }
