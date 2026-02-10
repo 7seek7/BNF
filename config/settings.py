@@ -30,6 +30,10 @@ class Settings:
     TELEGRAM_BOT_TOKEN_TRADE = os.getenv('TELEGRAM_BOT_TOKEN_TRADE', '')  # 交易 Telegram 机器人 Token
     TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID', '')  # Telegram 聊天 ID
 
+    # HuggingFace 配置 (Streamlit Cloud 持久化存储)
+    HUGGINGFACE_TOKEN = os.getenv('HUGGINGFACE_TOKEN', '')  # HuggingFace Access Token
+    HUGGINGFACE_REPO_ID = os.getenv('HUGGINGFACE_REPO_ID', '')  # HuggingFace 仓库 ID (格式: username/repo-name)
+
     # 警报参数 - 监控阈值与频率（处理优化器传入的浮点数值）
     MONITOR_INTERVAL = int(float(os.getenv('MONITOR_INTERVAL', '5')))  # 监控周期（分钟）
     MONITOR_SYMBOLS_COUNT = int(float(os.getenv('MONITOR_SYMBOLS_COUNT', '100')))  # 按成交量排序前 N 名币种进行监控
@@ -190,7 +194,11 @@ class Settings:
         cls.TELEGRAM_BOT_TOKEN_ALERT = os.getenv('TELEGRAM_BOT_TOKEN_ALERT', '')
         cls.TELEGRAM_BOT_TOKEN_TRADE = os.getenv('TELEGRAM_BOT_TOKEN_TRADE', '')
         cls.TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID', '')
-        
+
+        # HuggingFace 配置
+        cls.HUGGINGFACE_TOKEN = os.getenv('HUGGINGFACE_TOKEN', '')
+        cls.HUGGINGFACE_REPO_ID = os.getenv('HUGGINGFACE_REPO_ID', '')
+
         # 警报参数（处理优化器传入的浮点数值）
         cls.MONITOR_INTERVAL = int(float(os.getenv('MONITOR_INTERVAL', '5')))
         cls.MONITOR_SYMBOLS_COUNT = int(float(os.getenv('MONITOR_SYMBOLS_COUNT', '100')))

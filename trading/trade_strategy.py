@@ -591,7 +591,8 @@ class TradeStrategy:
             total_investment = position_info['total_investment']
             leverage = position_info['leverage']
             
-            if total_quantity <= 0 or entry_price <= 0:
+            if total_quantity <= 0 or entry_price <= 0 or current_price <= 0:
+                logger.warning(f"{symbol} 参数无效: quantity={total_quantity}, entry={entry_price}, current={current_price}")
                 return
             
             # 计算盈亏率（含杠杆）
