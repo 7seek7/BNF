@@ -32,6 +32,10 @@ st.set_page_config(
 sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).parent / 'optimizers'))
 sys.path.insert(0, str(Path(__file__).parent / 'utils'))
+sys.path.insert(0, str(Path(__file__).parent / 'config'))
+sys.path.insert(0, str(Path(__file__).parent / 'alert'))
+sys.path.insert(0, str(Path(__file__).parent / 'backtest'))
+sys.path.insert(0, str(Path(__file__).parent / 'trading'))
 
 
 class GlobalOptimizerUI:
