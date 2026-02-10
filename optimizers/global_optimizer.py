@@ -93,10 +93,15 @@ class GlobalOptimizer:
                     repo_id=repo_id,
                     local_dir=self.optimizer_dir
                 )
-                logger.info("[GlobalOptimizer] HuggingFace 持久化存储已启用")
-                logger.info(f"  仓库: {self.hf_storage.get_repo_url()}")
+                if self.hf_storage.initialized:
+                    logger.info("[GlobalOptimizer] HuggingFace 持久化存储已启用")
+                    logger.info(f"  仓库: {self.hf_storage.get_repo_url()}")
+                else:
+                    logger.warning("[GlobalOptimizer] HuggingFace 未启用，将使用本地临时存储")
+                    self.hf_storage = None
             except Exception as e:
                 logger.warning(f"[GlobalOptimizer] HuggingFace 存储初始化失败: {e}")
+                self.hf_storage = None
 
         # CMA-ES参数（适应当前参数量，减少内存和计算）
         cma_config = {
