@@ -35,7 +35,7 @@ python-json-logger>=2.0.0
 
 # 实用工具
 tenacity>=8.0.0
-retry>=2.2.0
+# retry 已移除 - 使用自定义重试装饰器
 
 # 配置管理
 pyyaml>=6.0
