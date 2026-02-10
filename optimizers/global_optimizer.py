@@ -36,6 +36,7 @@ from state_manager import StateManager, OptimizationState
 from tpe_sampler import TPE_Optimizer
 from cma_es_optimizer import MultiStartCMAES
 from differential_evolution import MultiStartDE
+from huggingface_storage import HuggingFaceStorage, is_huggingface_configured
 logger = Logger.get_logger('global_optimizer')
 
 
@@ -51,10 +52,11 @@ class GlobalOptimizer:
                  backtest_days: int = 60,
                  coins: Optional[List[str]] = None,
                  optimizer_dir: Optional[Path] = None,
-                 max_workers: int = 10):
+                 max_workers: int = 10,
+                 enable_hf_storage: bool = True):
         """
         初始化全局优化器
-        
+
         Args:
             param_bounds: 参数边界 {param_name: {'min': x, 'max': y}}
             max_evaluations: 最大评估次数
@@ -62,6 +64,7 @@ class GlobalOptimizer:
             coins: 回测币种列表
             optimizer_dir: 优化器目录
             max_workers: 并行worker数
+            enable_hf_storage: 是否启用 HuggingFace 存储（用于 Streamlit Cloud）
         """
         self.param_bounds = param_bounds
         self.dim = len(param_bounds)
@@ -70,15 +73,31 @@ class GlobalOptimizer:
         self.coins = coins or ['BTCUSDT']
         self.optimizer_dir = optimizer_dir or Path(__file__).parent / "optimizer_state"
         self.max_workers = max_workers
-        
+        self.enable_hf_storage = enable_hf_storage
+
         # 创建保存目录
         self.optimizer_dir.mkdir(parents=True, exist_ok=True)
-        
+
         # 初始化各组件
         self.state_manager = StateManager(self.optimizer_dir)
         self.evaluator = ParallelEvaluator(max_workers=max_workers)
         self.tpe_opt = TPE_Optimizer(param_bounds, max_evaluations=1000, parallel_evaluator=self.evaluator)
-        
+
+        # HuggingFace 存储（持久化）
+        self.hf_storage = None
+        if self.enable_hf_storage and is_huggingface_configured():
+            try:
+                from config.settings import settings
+                repo_id = getattr(settings, 'HUGGINGFACE_REPO_ID', None)
+                self.hf_storage = HuggingFaceStorage(
+                    repo_id=repo_id,
+                    local_dir=self.optimizer_dir
+                )
+                logger.info("[GlobalOptimizer] HuggingFace 持久化存储已启用")
+                logger.info(f"  仓库: {self.hf_storage.get_repo_url()}")
+            except Exception as e:
+                logger.warning(f"[GlobalOptimizer] HuggingFace 存储初始化失败: {e}")
+
         # CMA-ES参数（适应当前参数量，减少内存和计算）
         cma_config = {
             'population_size': 40,  # 高维度降低种群大小
@@ -86,7 +105,7 @@ class GlobalOptimizer:
             'target_fitness': None
         }
         self.cma_opt = MultiStartCMAES(param_bounds, num_starts=3, cma_params=cma_config)
-        
+
         # DE参数
         de_config = {
             'population_size': 30,  # 高维度降低种群
@@ -94,10 +113,14 @@ class GlobalOptimizer:
             'F': 0.8,
             'CR': 0.9
         }
-        self.de_opt = MultiStartDE(param_bounds, num_starts=5, population_size=30, 
+        self.de_opt = MultiStartDE(param_bounds, num_starts=5, population_size=30,
                                 generations=200, parallel_evaluator=self.evaluator)
-        
-        # 初始化状态
+
+        # 初始化状态（先尝试从 HuggingFace 下载）
+        if self.hf_storage and self.hf_storage.check_has_saved_state():
+            logger.info("[GlobalOptimizer] 检测到 HuggingFace 上有保存的状态")
+            self.hf_storage.download_optimizer_state()
+
         state = self.state_manager.load_state()
         if state is None:
             state = self.state_manager.init_state({
@@ -107,9 +130,12 @@ class GlobalOptimizer:
                 'max_workers': max_workers,
                 'coins': self.coins
             })
-        
+            # 初始状态也上传到 HuggingFace
+            if self.hf_storage:
+                self.hf_storage.upload_optimizer_state()
+
         self.state = state
-        
+
         # 阶段配置
         self.phases = {
             'phase1_random': {
@@ -131,7 +157,7 @@ class GlobalOptimizer:
             },
             'phase5_validation': {
                 'n_evaluations': 1000,
-                'description': '最终验证 - 细粒度确认'
+                'description': '最终验证 - 细粒度确认最优'
             }
         }
 
@@ -206,10 +232,25 @@ class GlobalOptimizer:
         logger.info(f"策略: 随机 → TPE → CMA-ES → DE → 验证")
         logger.info(f"总评估次数: {sum(p['n_evaluations'] for p in self.phases.values())}")
         
-        if resume:
+        # Phase 执行顺序
+        phase_order = [
+            ('phase1_random', self._run_phase1_random),
+            ('phase2_tpe', self._run_phase2_tpe),
+            ('phase3_cmaes', self._run_phase3_cames),
+            ('phase4_de', self._run_phase4_de),
+            ('phase5_validation', self._run_phase5_validation)
+        ]
+        
+        # 确定起始 Phase
+        if resume and self.state.phase != 'completed':
+            # 从上次中断的 phase 继续
+            start_phase = self.state.phase
             logger.info(f"模式: 恢复模式")
-            logger.info(f"当前状态: {self.state.phase}")
+            logger.info(f"当前状态: {start_phase}")
+            logger.info(f"已完成评估: {self.state.progress} 次")
         else:
+            # 全新开始
+            start_phase = 'phase1_random'
             logger.info(f"模式: 全新开始")
             # 立即初始化状态，让页面能显示Phase 1
             self.state.phase = 'phase1_random'
@@ -218,40 +259,14 @@ class GlobalOptimizer:
         start_time = time.time()
         
         try:
-            # ===== Phase 1: 随机搜索 =====
-            logger.info("\n" + "="*70)
-            logger.info("Phase 1: 随机搜索建立基准")
-            logger.info("="*70)
-            
-            self._run_phase1_random()
-            
-            # ===== Phase 2: TPE贝叶斯优化 =====
-            logger.info("\n" + "="*70)
-            logger.info("Phase 2: TPE贝叶斯优化 - 智能高效采样")
-            logger.info("="*70)
-            
-            self._run_phase2_tpe()
-            
-            # ===== Phase 3: CMA-ES精调 =====
-            logger.info("\n" "/"*70)
-            logger.info("\\ Phase 3: CMA-ES精调 - 高维区域精细化")
-            logger.info("="*70)
-            
-            self._run_phase3_cames()
-            
-            # ===== Phase 4: DE多区域探索 =====
-            logger.info("\n" + "="*70)
-            logger.info("Phase 4: DE多区域探索 - 全局覆盖加强")
-            logger.info("="*70)
-            
-            self._run_phase4_de()
-            
-            # ===== Phase 5: 最终验证 =====
-            logger.info("\n" + "="*70)
-            logger.info("Phase 5: 最终验证 - 细粒度确认最优")
-            logger.info("="*70)
-            
-            self._run_phase5_validation()
+            # 按 Phase 顺序执行，从 start_phase 开始
+            should_run = False
+            for phase_name, phase_func in phase_order:
+                if phase_name == start_phase:
+                    should_run = True
+                
+                if should_run:
+                    phase_func()
             
         except KeyboardInterrupt:
             logger.warning("\n[GlobalOptimizer] 用户中断优化")
@@ -276,6 +291,28 @@ class GlobalOptimizer:
         self._generate_final_report(global_best, total_time)
         
         return global_best
+
+    def _upload_current_state(self, phase: Optional[str] = None):
+        """
+        上传当前状态到 HuggingFace
+
+        Args:
+            phase: 当前阶段名称（可选）
+        """
+        if self.hf_storage:
+            try:
+                # 收集阶段结果文件
+                phase_files = []
+                if phase:
+                    phase_files = [f"phase_{phase}_results.json"]
+                else:
+                    # 上传所有阶段结果
+                    phase_files = [f"phase_{p}_results.json" for p in self.phases.keys() if (self.optimizer_dir / f"phase_{p}_results.json").exists()]
+
+                self.hf_storage.upload_optimizer_state(state_file="state.json", phase_results=phase_files)
+                logger.debug(f"[GlobalOptimizer] 状态已上传到 HuggingFace (phase={phase})")
+            except Exception as e:
+                logger.error(f"[GlobalOptimizer] 上传 HuggingFace 失败: {e}")
 
     def _run_phase1_random(self):
         """Phase 1: 随机搜索"""
@@ -325,6 +362,9 @@ class GlobalOptimizer:
             logger.info(f"[Phase 1] 完成: best_fitness={best.fitness:.4f}, "
                        f"avg={avg_fitness:.4f}")
 
+        # 上传状态到 HuggingFace
+        self._upload_current_state(phase)
+
     def _run_phase2_tpe(self):
         """Phase 2: TPE贝叶斯优化"""
         phase = 'phase2_tpe'
@@ -365,6 +405,9 @@ class GlobalOptimizer:
         print(f"  - 累计评估: {self.state.progress}/{total_evals}")
         logger.info(f"[Phase 2] 完成: best_fitness={result['fitness']:.4f}, "
                    f"n_evals={result['n_evaluations']}")
+
+        # 上传状态到 HuggingFace
+        self._upload_current_state(phase)
 
     def _run_phase3_cames(self):
         """Phase 3: CMA-ES精调"""
@@ -421,6 +464,9 @@ class GlobalOptimizer:
         print(f"  - 累计评估: {self.state.progress}/{total_evals}")
         logger.info(f"[Phase 3] 完成: best_fitness={result['fitness']:.4f}")
 
+        # 上传状态到 HuggingFace
+        self._upload_current_state(phase)
+
     def _run_phase4_de(self):
         """Phase 4: DE多区域探索"""
         phase = 'phase4_de'
@@ -457,6 +503,9 @@ class GlobalOptimizer:
         total_evals = sum(p['n_evaluations'] for p in self.phases.values())
         print(f"  - 累计评估: {self.state.progress}/{total_evals}")
         logger.info(f"[Phase 4] 完成: best_fitness={result['fitness']:.4f}")
+
+        # 上传状态到 HuggingFace
+        self._upload_current_state(phase)
 
     def _run_phase5_validation(self):
         """Phase 5: 最终验证"""
@@ -616,12 +665,12 @@ class GlobalOptimizer:
                 'samples_per_hour': self.state.progress / total_time_hours if total_time_hours > 0 else 0
             }
         }
-        
+
         # 保存报告
         report_file = self.optimizer_dir / "final_report.json"
         with open(report_file, 'w', encoding='utf-8') as f:
             json.dump(report, f, indent=2, ensure_ascii=False)
-        
+
         logger.info(f"\n{'='*70}")
         logger.info(f"📊 最终优化报告")
         logger.info(f"{'='*70}")
@@ -629,7 +678,7 @@ class GlobalOptimizer:
         logger.info(f"总耗时: {total_time_hours:.2f}小时")
         logger.info(f"最优fitness: {global_best['fitness']:.4f}")
         logger.info(f"报告已保存: {report_file}")
-        
+
         # 同时保存为JSON用于Streamlit显示
         display_report_file = self.optimizer_dir / "display_report.json"
         with open(display_report_file, 'w', encoding='utf-8') as f:
@@ -638,10 +687,18 @@ class GlobalOptimizer:
                 'best_fitness': float(global_best['fitness']),
                 'total_evaluations': int(self.state.progress),
                 'total_time_hours': round(total_time_hours, 2),
-                'phases_completed': list(self.phases.keys())
+                'phases_completed': list(self.phases.keys()),
+                'timestamp': datetime.now().isoformat()
             }, f, indent=2, ensure_ascii=False)
-        
+
         logger.info(f"显示报告: {display_report_file}")
+
+        # 上传到 HuggingFace
+        if self.hf_storage:
+            logger.info("[GlobalOptimizer] 上传最终报告到 HuggingFace...")
+            self.hf_storage.upload_optimizer_state()
+            if self.hf_storage.get_repo_url():
+                logger.info(f"[GlobalOptimizer] HuggingFace 仓库: {self.hf_storage.get_repo_url()}")
 
     def resume_optimization(self) -> Dict[str, Any]:
         """
@@ -687,7 +744,7 @@ class GlobalOptimizer:
             sorted_results = sorted(results, key=lambda x: x.get('fitness', -float('inf')), reverse=True)
             best = sorted_results[0]
 
-            logger.info(f"[_get_best_from_phase] {phase} 最佳结果: fitness={best.get('fitness', -inf):.4f}")
+            logger.info(f"[_get_best_from_phase] {phase} 最佳结果: fitness={best.get('fitness', -float('inf')):.4f}")
             return best
 
         except Exception as e:
