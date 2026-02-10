@@ -658,6 +658,42 @@ class GlobalOptimizer:
         logger.info(f"[Resume] 从阶段 {state.phase} 恢复优化，已完成 {state.progress} 次评估")
         return self.run_optimization(resume=True)
 
+    def _get_best_from_phase(self, phase: str) -> Optional[Dict[str, Any]]:
+        """
+        从阶段结果中获取最佳结果
+
+        Args:
+            phase: 阶段名称（如 'phase1_random', 'phase2_tpe'）
+
+        Returns:
+            最佳结果字典，包含 'params' 和 'fitness'
+        """
+        import json
+
+        phase_file = self.optimizer_dir / f"phase_{phase}_results.json"
+        if not phase_file.exists():
+            logger.warning(f"[_get_best_from_phase] 结果文件不存在: {phase_file}")
+            return None
+
+        try:
+            with open(phase_file, 'r', encoding='utf-8') as f:
+                results = json.load(f)
+
+            if not results:
+                logger.warning(f"[_get_best_from_phase] 结果为空: {phase}")
+                return None
+
+            # 按 fitness 排序，取最大的
+            sorted_results = sorted(results, key=lambda x: x.get('fitness', -float('inf')), reverse=True)
+            best = sorted_results[0]
+
+            logger.info(f"[_get_best_from_phase] {phase} 最佳结果: fitness={best.get('fitness', -inf):.4f}")
+            return best
+
+        except Exception as e:
+            logger.error(f"[_get_best_from_phase] 加载结果失败 {phase}: {e}")
+            return None
+
     def cleanup(self):
         """清理优化状态"""
         self.state_manager.cleanup()
