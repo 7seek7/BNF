@@ -855,6 +855,18 @@ class GlobalOptimizerUI:
         Returns:
             回测结果字典，包含 fitness 和其他指标
         """
+        # 在多进程环境中重新设置 sys.path
+        import sys
+        from pathlib import Path
+        script_path = Path(__file__).parent
+        sys.path.insert(0, str(script_path))
+        sys.path.insert(0, str(script_path / 'optimizers'))
+        sys.path.insert(0, str(script_path / 'utils'))
+        sys.path.insert(0, str(script_path / 'config'))
+        sys.path.insert(0, str(script_path / 'alert'))
+        sys.path.insert(0, str(script_path / 'backtest'))
+        sys.path.insert(0, str(script_path / 'trading'))
+
         try:
             from backtest.data_downloader import DataDownloader
             from backtest.unified_backtest import UnifiedBacktester
